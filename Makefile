@@ -6,7 +6,7 @@ VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo dev)
 # git, which the About box shows.
 LDFLAGS := -s -w
 
-.PHONY: build run test vet check icons screenshots appimage clean
+.PHONY: build run test bench vet check icons screenshots appimage clean
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
@@ -21,6 +21,21 @@ TEST_TIMEOUT := 5m
 
 test:
 	go test -race -timeout $(TEST_TIMEOUT) ./...
+
+# Times the editor on a 13 MB file: reading, writing, typing, finding and
+# replacing. To see what a change did, save the output from before and
+# after it and compare the two:
+#
+#   make bench COUNT=10 > old.txt    (then, with the change)
+#   make bench COUNT=10 > new.txt
+#   benchstat old.txt new.txt
+#
+# BENCH picks the benchmarks by a regular expression: make bench BENCH=Find.
+BENCH ?= .
+COUNT ?= 1
+
+bench:
+	go test -run '^$$' -bench '$(BENCH)' -benchmem -count $(COUNT) -timeout 30m ./...
 
 vet:
 	go vet ./...

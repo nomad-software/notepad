@@ -2,6 +2,9 @@ package ui
 
 import (
 	"fmt"
+	"slices"
+	"sort"
+	"strings"
 
 	"github.com/nomad-software/qute/qtcore"
 	"github.com/nomad-software/qute/qtgui"
@@ -13,6 +16,9 @@ import (
 // maxHighlights is how many of a search's matches are highlighted at most,
 // so that a search for "e" in a large file stays quick.
 const maxHighlights = 2000
+
+// escapesTip tells of the escapes the bar's fields take (unescape).
+const escapesTip = `\t is a tab, \n a line break and \\ a backslash`
 
 // findBar is the bar along the bottom of a window that finds text in the
 // current document and, opened for replacing, replaces it.
@@ -32,6 +38,9 @@ type findBar struct {
 	highlighted *Doc
 	// more is whether it has more matches than are highlighted.
 	more bool
+	// spanList are the matches of the search spanKey.
+	spanKey  spanSearch
+	spanList []span
 }
 
 // fieldKeys handles the keys of the bar's text fields: Escape closes the
@@ -88,6 +97,7 @@ func newFindBar(w *Window) *findBar {
 	row := qtwidgets.NewQHBoxLayout(nil)
 	row.SetSpacing(6)
 	b.find = field("Find", false)
+	b.find.SetToolTip(escapesTip)
 	b.find.SetObjectName("notepadFindField")
 	b.find.OnTextEdited(func(string) { b.incremental() })
 	row.AddWidget(b.find)
@@ -118,6 +128,7 @@ func newFindBar(w *Window) *findBar {
 	rrow.SetContentsMargins(qtcore.QMargins{})
 	rrow.SetSpacing(6)
 	b.replace = field("Replace with", true)
+	b.replace.SetToolTip(escapesTip)
 	rrow.AddWidget(b.replace)
 	rrow.AddWidget(button("Replace", b.replaceOne))
 	rrow.AddWidget(button("Replace All", b.replaceAll))
@@ -142,7 +153,7 @@ func (b *findBar) open(replace bool) {
 	b.show(replace)
 	if d := b.win.current(); d != nil {
 		if c := d.edit.TextCursor(); c.HasSelection() && !d.editor.selectionSpansLines(c) {
-			b.find.SetText(c.SelectedText())
+			b.find.SetText(escape(c.SelectedText()))
 		}
 	}
 	b.find.SetFocus()
@@ -163,9 +174,20 @@ func (b *findBar) close() {
 	b.box.SetVisible(false)
 	b.refresh.Stop()
 	b.clearHighlights()
+	b.spanKey, b.spanList = spanSearch{}, nil
 	b.setNotFound(false)
 	if d := b.win.current(); d != nil {
 		d.edit.SetFocus()
+	}
+}
+
+// forget lets go of what is kept of a document that is closing.
+func (b *findBar) forget(d *Doc) {
+	if b.highlighted == d {
+		b.highlighted = nil
+	}
+	if b.spanKey.doc == d {
+		b.spanKey, b.spanList = spanSearch{}, nil
 	}
 }
 
@@ -189,6 +211,92 @@ func (b *findBar) flags() qtgui.QTextDocumentFindFlags {
 	return f
 }
 
+// needle is the text searched for: the find field's, with its escapes
+// (\t, \n, \\) turned into what they stand for.
+func (b *findBar) needle() string { return unescape(b.find.Text()) }
+
+// spanSearch is a search with a line break in it and the text it was made
+// in, by which its matches are kept from one use to the next: finding the
+// next match and highlighting them all would otherwise each read the whole
+// text.
+type spanSearch struct {
+	doc                   *Doc
+	revision              int
+	needle                string
+	matchCase, wholeWords bool
+}
+
+// spans finds every match of a search that has a line break in it, which
+// Qt's own search can't: it looks in one line at a time.
+func (b *findBar) spans(d *Doc, needle string) []span {
+	key := spanSearch{d, d.edit.Document().Revision(), needle, b.matchCase.IsChecked(), b.wholeWords.IsChecked()}
+	if key != b.spanKey {
+		b.spanKey, b.spanList = key, findAll(d.text(), needle, key.matchCase, key.wholeWords)
+	}
+	return b.spanList
+}
+
+// multiline reports whether a search has a line break in it, and so is
+// made with spans rather than by Qt.
+func multiline(needle string) bool { return strings.Contains(needle, "\n") }
+
+// cursorOver returns a cursor with s selected.
+func cursorOver(d *Doc, s span) *qtgui.QTextCursor {
+	c := d.edit.TextCursor()
+	c.SetPosition(s.start)
+	c.SetPositionFull(s.end, qtgui.QTextCursorKeepAnchor)
+	return c
+}
+
+// nextSpan returns the match of a search with a line break in it that
+// comes after the selection, or before it, and whether the search went
+// round the end of the document. The cursor is null if there is no match.
+func (b *findBar) nextSpan(d *Doc, needle string, forward bool) (found *qtgui.QTextCursor, wrapped bool) {
+	all := b.spans(d, needle)
+	if len(all) == 0 {
+		return qtgui.NewQTextCursor(), false
+	}
+	sel := d.edit.TextCursor()
+	var i int
+	if forward {
+		i = sort.Search(len(all), func(i int) bool { return all[i].start >= sel.SelectionEnd() })
+		if wrapped = i == len(all); wrapped {
+			i = 0
+		}
+	} else {
+		i = sort.Search(len(all), func(i int) bool { return all[i].end > sel.SelectionStart() }) - 1
+		if wrapped = i < 0; wrapped {
+			i = len(all) - 1
+		}
+	}
+	return cursorOver(d, all[i]), wrapped
+}
+
+// nextInLine is nextSpan for a search within a line, which Qt makes.
+func (b *findBar) nextInLine(d *Doc, needle string, forward bool) (found *qtgui.QTextCursor, wrapped bool) {
+	flags := b.flags()
+	if !forward {
+		flags |= qtgui.QTextDocumentFindBackward
+	}
+	doc := d.edit.Document()
+	sel := d.edit.TextCursor()
+	found = doc.FindWithTextCursorFull(needle, sel, flags)
+	if !found.IsNull() {
+		return found, false
+	}
+	// The search goes round from the other end, unless it began there and
+	// so has been through the whole text already.
+	from, began := 0, sel.SelectionEnd()
+	if !forward {
+		from, began = doc.CharacterCount()-1, sel.SelectionStart()
+	}
+	if began == from {
+		return found, false
+	}
+	found = doc.FindFull(needle, from, flags)
+	return found, !found.IsNull()
+}
+
 // setNotFound shows the search field's text in red when there is no match.
 func (b *findBar) setNotFound(on bool) {
 	setBoolProperty(b.find, "notFound", on)
@@ -206,45 +314,54 @@ func (b *findBar) incremental() {
 	c := d.edit.TextCursor()
 	c.SetPosition(c.SelectionStart())
 	d.edit.SetTextCursor(c)
-	b.next(true)
-	b.highlight()
+	b.nextAndHighlight()
 }
 
 // next selects the next match after the selection, or before it, going
-// round past the end (or start) of the document.
-func (b *findBar) next(forward bool) {
+// round past the end (or start) of the document. It reports whether there
+// is a match.
+func (b *findBar) next(forward bool) bool {
 	d := b.win.current()
-	text := b.find.Text()
+	text := b.needle()
 	if d == nil {
-		return
+		return false
 	}
 	if text == "" {
 		b.setNotFound(false)
-		return
+		return false
 	}
-	flags := b.flags()
-	if !forward {
-		flags |= qtgui.QTextDocumentFindBackward
+	search := b.nextInLine
+	if multiline(text) {
+		search = b.nextSpan
 	}
-	doc := d.edit.Document()
-	found := doc.FindWithTextCursorFull(text, d.edit.TextCursor(), flags)
-	if found.IsNull() {
-		from := 0
-		if !forward {
-			from = doc.CharacterCount() - 1
-		}
-		found = doc.FindFull(text, from, flags)
-		if !found.IsNull() {
-			b.win.message("Search wrapped around")
-		}
-	}
+	found, wrapped := search(d, text, forward)
 	b.setNotFound(found.IsNull())
 	if found.IsNull() {
 		b.win.message(fmt.Sprintf("%q not found", text))
-		return
+		return false
+	}
+	if wrapped {
+		b.win.message("Search wrapped around")
 	}
 	d.edit.SetTextCursor(found)
 	d.edit.CenterCursor()
+	b.showCount(d)
+	return true
+}
+
+// nextAndHighlight selects the next match and highlights them all. A
+// search that finds no next match has been through the whole text, which
+// is not then searched again for matches to highlight.
+func (b *findBar) nextAndHighlight() {
+	d := b.win.current()
+	if b.next(true) || d == nil || b.needle() == "" || !b.visible() {
+		b.highlight()
+		return
+	}
+	b.clearHighlights()
+	b.more = false
+	b.highlighted = d
+	b.setNotFound(true)
 	b.showCount(d)
 }
 
@@ -253,7 +370,7 @@ func (b *findBar) next(forward bool) {
 func (b *findBar) highlight() {
 	b.clearHighlights()
 	d := b.win.current()
-	text := b.find.Text()
+	text := b.needle()
 	if d == nil || text == "" || !b.visible() {
 		b.setNotFound(false)
 		return
@@ -262,8 +379,15 @@ func (b *findBar) highlight() {
 	flags := b.flags()
 	var cursors []*qtgui.QTextCursor
 	// One more than are shown is looked for, to tell whether there are more.
-	for c := doc.FindFull(text, 0, flags); !c.IsNull() && len(cursors) <= maxHighlights; c = doc.FindWithTextCursorFull(text, c, flags) {
-		cursors = append(cursors, c)
+	if multiline(text) {
+		all := b.spans(d, text)
+		for _, s := range all[:min(len(all), maxHighlights+1)] {
+			cursors = append(cursors, cursorOver(d, s))
+		}
+	} else {
+		for c := doc.FindFull(text, 0, flags); !c.IsNull() && len(cursors) <= maxHighlights; c = doc.FindWithTextCursorFull(text, c, flags) {
+			cursors = append(cursors, c)
+		}
 	}
 	b.more = len(cursors) > maxHighlights
 	if b.more {
@@ -280,16 +404,19 @@ func (b *findBar) showCount(d *Doc) {
 	if b.highlighted != d {
 		return
 	}
-	current := 0
+	// The matches are in the order they are in the text, and it is asked
+	// at every move of the cursor, so the selection is looked for by
+	// halving rather than through them all.
+	matches := d.editor.matches
 	sel := d.edit.TextCursor()
-	for i, m := range d.editor.matches {
-		c := m.Cursor()
-		if c.SelectionStart() == sel.SelectionStart() && c.SelectionEnd() == sel.SelectionEnd() {
+	current := 0
+	i := sort.Search(len(matches), func(i int) bool { return matches[i].Cursor().SelectionStart() >= sel.SelectionStart() })
+	if i < len(matches) {
+		if c := matches[i].Cursor(); c.SelectionStart() == sel.SelectionStart() && c.SelectionEnd() == sel.SelectionEnd() {
 			current = i + 1
-			break
 		}
 	}
-	b.count.SetText(matchCount(current, len(d.editor.matches), b.more))
+	b.count.SetText(matchCount(current, len(matches), b.more))
 }
 
 // textChanged is told that a document's text has changed: its highlights
@@ -318,7 +445,11 @@ func (b *findBar) selectionMatches(d *Doc) bool {
 	}
 	// The search itself says, so that Match case and Whole words are
 	// heeded as they are when finding.
-	m := d.edit.Document().FindFull(b.find.Text(), c.SelectionStart(), b.flags())
+	text := b.needle()
+	if multiline(text) {
+		return slices.Contains(b.spans(d, text), span{c.SelectionStart(), c.SelectionEnd()})
+	}
+	m := d.edit.Document().FindFull(text, c.SelectionStart(), b.flags())
 	return !m.IsNull() && m.SelectionStart() == c.SelectionStart() && m.SelectionEnd() == c.SelectionEnd()
 }
 
@@ -330,17 +461,16 @@ func (b *findBar) replaceOne() {
 	}
 	if b.selectionMatches(d) {
 		c := d.edit.TextCursor()
-		c.InsertText(b.replace.Text())
+		c.InsertText(unescape(b.replace.Text()))
 		d.edit.SetTextCursor(c)
 	}
-	b.next(true)
-	b.highlight()
+	b.nextAndHighlight()
 }
 
 // replaceAll replaces every match, as one change to undo.
 func (b *findBar) replaceAll() {
 	d := b.win.current()
-	text, with := b.find.Text(), b.replace.Text()
+	text, with := b.needle(), unescape(b.replace.Text())
 	if d == nil || text == "" {
 		return
 	}
@@ -351,9 +481,22 @@ func (b *findBar) replaceAll() {
 	n := 0
 	// Each search starts after the text put in, so that a replacement that
 	// contains what is searched for is not replaced again.
-	for c := doc.FindFull(text, 0, flags); !c.IsNull(); c = doc.FindWithTextCursorFull(text, c, flags) {
-		c.InsertText(with)
-		n++
+	if multiline(text) {
+		// From the last match back, so that the matches before it stay
+		// where they were found; and with the one cursor, as the document
+		// moves every cursor there is at each change.
+		all := b.spans(d, text)
+		for _, s := range slices.Backward(all) {
+			edit.SetPosition(s.start)
+			edit.SetPositionFull(s.end, qtgui.QTextCursorKeepAnchor)
+			edit.InsertText(with)
+		}
+		n = len(all)
+	} else {
+		for c := doc.FindFull(text, 0, flags); !c.IsNull(); c = doc.FindWithTextCursorFull(text, c, flags) {
+			c.InsertText(with)
+			n++
+		}
 	}
 	edit.EndEditBlock()
 	b.highlight()

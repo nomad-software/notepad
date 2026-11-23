@@ -84,7 +84,7 @@ var DefaultKeybindings = map[string]string{
 	"find":           "Ctrl+F",
 	"find_next":      "F3",
 	"find_prev":      "Shift+F3",
-	"replace":        "Ctrl+H",
+	"replace":        "Ctrl+Shift+F",
 	"go_to_line":     "Ctrl+L",
 	"next_tab":       "Ctrl+PgDown",
 	"prev_tab":       "Ctrl+PgUp",

@@ -753,9 +753,7 @@ func (w *Window) closeDoc(d *Doc) {
 	if i := w.tabs.IndexOf(d.page); i >= 0 {
 		w.tabs.RemoveTab(i)
 	}
-	if w.find.highlighted == d {
-		w.find.highlighted = nil
-	}
+	w.find.forget(d)
 	w.docs = slices.DeleteFunc(w.docs, func(x *Doc) bool { return x == d })
 	w.unwatch(d.path)
 	d.page.DeleteLater()

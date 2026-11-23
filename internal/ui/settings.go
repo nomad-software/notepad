@@ -53,8 +53,8 @@ func checkBox(text string, on bool) *qtwidgets.QCheckBox {
 }
 
 // settingsDialog is the Settings dialog: General, User Interface, Colours
-// and Keyboard Shortcuts. Its settings are written to the settings file on OK or Apply
-// and applied at once.
+// and Keyboard Shortcuts. Its settings are written to the settings file on
+// OK or Apply and applied at once.
 type settingsDialog struct {
 	dlg  *qtwidgets.QDialog
 	tabs *qtwidgets.QTabWidget

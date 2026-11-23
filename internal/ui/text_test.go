@@ -3,6 +3,7 @@ package ui
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -142,6 +143,79 @@ func TestPlural(t *testing.T) {
 	for n, want := range map[int]string{0: "0 lines", 1: "1 line", 2: "2 lines"} {
 		if got := plural(n, "line", "lines"); got != want {
 			t.Errorf("plural(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
+func TestUnescape(t *testing.T) {
+	for in, want := range map[string]string{
+		`plain`:   "plain",
+		`a\tb`:    "a\tb",
+		`a\nb`:    "a\nb",
+		`a\\nb`:   `a\nb`,
+		`a\\\nb`:  "a\\\nb",
+		`C:\dir\`: `C:\dir\`,
+		`\`:       `\`,
+	} {
+		if got := unescape(in); got != want {
+			t.Errorf("unescape(%q) = %q, want %q", in, got, want)
+		}
+	}
+	for _, s := range []string{`C:\temp\new`, "a\tb", `\\`, "é\n"} {
+		if got := unescape(escape(s)); got != s {
+			t.Errorf("unescape(escape(%q)) = %q", s, got)
+		}
+	}
+}
+
+// TestFindAllFoldsCase checks both ways a search in any case is made: in
+// ASCII's lower case, and the general way for text or a search beyond it.
+func TestFindAllFoldsCase(t *testing.T) {
+	for _, tt := range []struct {
+		text, needle string
+		want         []span
+	}{
+		{"Ask\nASK\nask", "aSk\nA", []span{{0, 5}}},
+		{"Éa\nÉA", "éA\né", []span{{0, 4}}},
+		{"1 \u212a\n2 k\n", "K\n", []span{{2, 4}, {6, 8}}}, // the Kelvin sign is a k
+		{"\u017f\nS\n", "s\n", []span{{0, 2}, {2, 4}}},     // the long s is an s
+		{"😀A\nb", "a\nB", []span{{2, 5}}},
+	} {
+		got := findAll(tt.text, tt.needle, false, false)
+		if !slices.Equal(got, tt.want) {
+			t.Errorf("findAll(%q, %q) = %v, want %v", tt.text, tt.needle, got, tt.want)
+		}
+	}
+}
+
+func TestFindAll(t *testing.T) {
+	text := "one\nTwo\n😀é\ntwo\n\n\n"
+	tests := []struct {
+		needle           string
+		matchCase, words bool
+		want             []span
+	}{
+		{"\n", true, false, []span{{3, 4}, {7, 8}, {11, 12}, {15, 16}, {16, 17}, {17, 18}}},
+		{"\n\n", true, false, []span{{15, 17}}},
+		{"\ntwo", false, false, []span{{3, 7}, {11, 15}}},
+		{"\ntwo", true, false, []span{{11, 15}}},
+		{"É\nTWO", false, false, []span{{10, 15}}},
+		{"e\nTwo", true, true, nil},
+		{"one\nTwo", true, true, []span{{0, 7}}},
+		{"", true, false, nil},
+		{"zzz", true, false, nil},
+	}
+	for _, tt := range tests {
+		got := findAll(text, tt.needle, tt.matchCase, tt.words)
+		if len(got) != len(tt.want) {
+			t.Errorf("findAll(%q, case %v, words %v) = %v, want %v", tt.needle, tt.matchCase, tt.words, got, tt.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tt.want[i] {
+				t.Errorf("findAll(%q, case %v, words %v) = %v, want %v", tt.needle, tt.matchCase, tt.words, got, tt.want)
+				break
+			}
 		}
 	}
 }

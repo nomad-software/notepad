@@ -21,9 +21,18 @@ See README.md for features and settings.
 - `NOTEPAD_SCREENSHOTS=dir go test -run TestScreenshot ./internal/ui` saves
   the README's one screenshot: a note in the dark window theme with
   Solarized Dark at 13 pt, no bars or highlights. Keep it looking like
-  plain everyday use. `NOTEPAD_PERF=1 go test -run
-  LargeFileTimes -v ./internal/ui` times a 13 MB file. Report the numbers
-  before and after any performance change.
+  plain everyday use.
+- `make bench` (`BENCH=regexp`, `COUNT=n`) runs the benchmarks: a 13 MB
+  file opened, typed in, saved, searched and replaced in
+  (`internal/ui/bench_test.go`, in a window on the offscreen platform), and
+  read and written in each encoding (`internal/textfile/bench_test.go`).
+  For any performance change save the output before and after
+  (`COUNT=10`, to a scratch folder, not the project), compare them with
+  `benchstat` (in `$GOPATH/bin`) and report the numbers. A new hot path
+  gets a benchmark. A QTextDocument moves every live QTextCursor at each
+  edit, and qute frees one only when Go's GC runs: reuse one cursor in
+  loops that edit, and in window benchmarks call `collect` between runs or
+  the time per run grows with the number of runs.
 - Run under Xvfb with `QT_QPA_PLATFORM=xcb`, `XDG_CONFIG_HOME` and
   `XDG_DATA_HOME` in a scratch folder and `NOTEPAD_NO_DESKTOP_ENTRY=1`. Under
   Xvfb on this KDE machine the "system" window theme draws the menu bar and
@@ -81,6 +90,11 @@ See README.md for features and settings.
   (size, mtime, inode) recorded after each read and write; the watcher is
   re-armed after every change while a tab still has the file open, as a
   file replaced by rename stops being watched.
+- The find bar's fields are read through `unescape` (`\t`, `\n`, `\\`), and
+  text put in them goes through `escape`. QTextDocument's find looks in one
+  line at a time, so a search with a line break in it is made by `findAll`
+  (text.go) over `Doc.text()` instead, its matches kept (`findBar.spans`)
+  until the document's revision or the search changes.
 - Idle must stay at ~0% CPU: no polling timers. The find highlights refresh
   on a single-shot timer after edits only while the bar is open.
 - Binary size: never call reflect's `Method`/`MethodByName` with a computed

@@ -3,6 +3,7 @@ package ui
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,7 +25,7 @@ func TestMain(m *testing.M) { qutetest.TestMain(m) }
 
 // newTestWindow opens a window with a settings file of its own, which is
 // closed when the test ends, its changes let go.
-func newTestWindow(t *testing.T, set func(*config.Config), files ...string) *Window {
+func newTestWindow(t testing.TB, set func(*config.Config), files ...string) *Window {
 	t.Helper()
 	t.Setenv("NOTEPAD_NO_DESKTOP_ENTRY", "1")
 	cfg := config.Default()
@@ -72,7 +73,7 @@ func findChild(o qtcore.QObjectLike, name string) *qtcore.QObject {
 	return nil
 }
 
-func writeFile(t *testing.T, name string, data []byte) string {
+func writeFile(t testing.TB, name string, data []byte) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(path, data, 0o644); err != nil {
@@ -367,6 +368,159 @@ func TestFindAndReplace(t *testing.T) {
 		qutetest.Key(w.find.find, qtcore.Key_Escape, qtcore.NoModifier)
 		if w.find.visible() || len(d.editor.matches) != 0 {
 			t.Error("Escape did not close the bar and clear the highlights")
+		}
+	})
+}
+
+func TestFindAndReplaceEscapes(t *testing.T) {
+	qutetest.Run(t, func() {
+		w := newTestWindow(t, nil)
+		d := w.current()
+		d.edit.SetPlainText("a\tb\na\\tb\nc\n\nd")
+		d.goTo(0, 0)
+		w.run("replace", false)
+
+		// A tab, and a backslash followed by a t.
+		qutetest.Type(w.find.find, `a\tb`)
+		if c := d.edit.TextCursor(); c.SelectionStart() != 0 || c.SelectionEnd() != 3 {
+			t.Errorf(`\t found %d to %d`, c.SelectionStart(), c.SelectionEnd())
+		}
+		if got := w.find.count.Text(); got != "1 of 1" {
+			t.Errorf(`\t: count %q`, got)
+		}
+		w.find.find.SetText(`a\\tb`)
+		w.find.next(true)
+		if c := d.edit.TextCursor(); c.SelectionStart() != 4 || c.SelectionEnd() != 8 {
+			t.Errorf(`\\t found %d to %d`, c.SelectionStart(), c.SelectionEnd())
+		}
+
+		// A line break: found, counted, gone round, and replaced one at a time.
+		w.find.find.SetText(`b\na`)
+		d.goTo(0, 0)
+		w.find.next(true)
+		w.find.highlight()
+		if c := d.edit.TextCursor(); c.SelectionStart() != 2 || c.SelectionEnd() != 5 {
+			t.Errorf(`\n found %d to %d`, c.SelectionStart(), c.SelectionEnd())
+		}
+		if got := w.find.count.Text(); got != "1 of 1" {
+			t.Errorf(`\n: count %q`, got)
+		}
+		w.find.next(false)
+		if c := d.edit.TextCursor(); c.SelectionStart() != 2 {
+			t.Errorf("Previous went to %d", c.SelectionStart())
+		}
+		w.find.replace.SetText(`b\n\ta`)
+		w.find.replaceOne()
+		if got := d.text(); got != "a\tb\n\ta\\tb\nc\n\nd" {
+			t.Errorf("replaced one: %q", got)
+		}
+
+		// Every line break, as one change to undo.
+		w.find.find.SetText(`\n`)
+		w.find.replace.SetText(`\\n\n`)
+		w.find.replaceAll()
+		if got := d.text(); got != "a\tb\\n\n\ta\\tb\\n\nc\\n\n\\n\nd" {
+			t.Errorf("replaced all: %q", got)
+		}
+		d.edit.Undo()
+		if got := d.text(); got != "a\tb\n\ta\\tb\nc\n\nd" {
+			t.Errorf("Replace All took more than one undo: %q", got)
+		}
+
+		// A selection with a backslash in it is searched for as it is.
+		w.find.close()
+		c := d.edit.TextCursor()
+		c.SetPosition(5)
+		c.SetPositionFull(9, qtgui.QTextCursorKeepAnchor)
+		d.edit.SetTextCursor(c)
+		w.run("find", false)
+		if got := w.find.find.Text(); got != `a\\tb` {
+			t.Errorf("the field took the selection as %q", got)
+		}
+		if got := w.find.count.Text(); got != "1 of 1" {
+			t.Errorf("selection: count %q", got)
+		}
+
+		// The matches kept of a search across lines are found again once
+		// the text has changed, and let go of when the tab closes.
+		w.find.find.SetText(`c\n`)
+		w.find.highlight()
+		if got := len(d.editor.matches); got != 1 {
+			t.Fatalf(`c\n: %d matches`, got)
+		}
+		d.edit.AppendPlainText("c\n")
+		w.find.highlight()
+		if got := len(d.editor.matches); got != 2 {
+			t.Errorf(`c\n after an edit: %d matches`, got)
+		}
+		d.edit.Document().SetModifiedFull(false)
+		w.closeDoc(d)
+		if w.find.spanKey.doc == d || w.find.highlighted == d {
+			t.Error("the find bar kept a closed document")
+		}
+	})
+}
+
+// TestFindGoesRoundAndCounts checks the searches that are cut short: one
+// that began at an end of the text is not made again from it, and the
+// selected match is looked for among the highlighted ones by halving.
+func TestFindGoesRoundAndCounts(t *testing.T) {
+	qutetest.Run(t, func() {
+		w := newTestWindow(t, nil)
+		d := w.current()
+		d.edit.SetPlainText("cat dog cat\nCat catalog")
+		at := func() int { return d.edit.TextCursor().SelectionStart() }
+		w.run("find", false)
+		w.find.find.SetText("cat")
+		w.find.highlight()
+
+		// Every match in turn, forward and round, is counted as itself.
+		d.goTo(0, 0)
+		for i, want := range []int{0, 8, 12, 16, 0} {
+			w.find.next(true)
+			if count := fmt.Sprintf("%d of 4", i%4+1); at() != want || w.find.count.Text() != count {
+				t.Errorf("Next %d: at %d showing %q, want %d and %q", i, at(), w.find.count.Text(), want, count)
+			}
+		}
+		// Backward from the first, round to the last; and from the very end.
+		w.find.next(false)
+		if at() != 16 || w.find.count.Text() != "4 of 4" {
+			t.Errorf("Previous from the first: at %d showing %q", at(), w.find.count.Text())
+		}
+		d.goTo(1, 11)
+		w.find.next(false)
+		if at() != 16 {
+			t.Errorf("Previous from the end: at %d", at())
+		}
+		// A cursor that is on no match is counted as none.
+		d.goTo(0, 5)
+		if got := w.find.count.Text(); got != "4 matches" {
+			t.Errorf("off the matches: count %q", got)
+		}
+
+		// No match, from the start, the middle and the end, either way.
+		for _, pos := range [][2]int{{0, 0}, {0, 5}, {1, 11}} {
+			for _, forward := range []bool{true, false} {
+				d.goTo(pos[0], pos[1])
+				w.find.find.SetText("zzz")
+				before := at()
+				if w.find.next(forward) || at() != before || w.find.find.Property("notFound").Value() != true {
+					t.Errorf("zzz from %v, forward %v: found, or not shown as not found", pos, forward)
+				}
+			}
+		}
+		// Typed, it is shown as having no matches without highlights.
+		d.goTo(0, 5)
+		w.find.find.Clear()
+		qutetest.Type(w.find.find, "zzz")
+		if got := w.find.count.Text(); got != "No matches" || len(d.editor.matches) != 0 || w.find.highlighted != d {
+			t.Errorf("typed zzz: count %q, %d matches", got, len(d.editor.matches))
+		}
+		// And what is typed next is found and highlighted again.
+		w.find.find.Clear()
+		qutetest.Type(w.find.find, "dog")
+		if got := w.find.count.Text(); got != "1 of 1" || len(d.editor.matches) != 1 {
+			t.Errorf("typed dog: count %q, %d matches", got, len(d.editor.matches))
 		}
 	})
 }

@@ -17,7 +17,9 @@ The screenshot is drawn by `make screenshots`.
   and optional **wrapping** of long lines.
 - **Find and replace** in a bar below the text, with Match case and Whole words.
   Matches are highlighted while the bar is open (the first 2000, so that
-  a search in a large file stays quick), and the bar counts them.
+  a search in a large file stays quick), and the bar counts them. Both
+  fields take `\t` for a tab, `\n` for a line break and `\\` for a
+  backslash.
 - **Go to line** (Ctrl+L).
 - **Tab and Shift+Tab** indent and unindent the selected lines, with tabs
   or spaces of the chosen width.
@@ -103,7 +105,7 @@ kept in the same file.
 | Action | Shortcut | Action | Shortcut |
 | --- | --- | --- | --- |
 | New Window | Ctrl+Shift+N | Find | Ctrl+F |
-| New Tab | Ctrl+T | Find and Replace | Ctrl+H |
+| New Tab | Ctrl+T | Find and Replace | Ctrl+Shift+F |
 | Open | Ctrl+O | Find Next | F3 |
 | Save | Ctrl+S | Find Previous | Shift+F3 |
 | Save As | Ctrl+Shift+S | Go to Line | Ctrl+L |
@@ -151,11 +153,22 @@ as new.
 ```sh
 make test     # all tests, with the race detector
 make check    # go vet, gofmt, staticcheck and qute vet
+make bench    # benchmarks: a 13 MB file opened, typed in, saved and searched
 ```
 
-The GUI tests run on Qt's offscreen platform, so they need no display.
-`NOTEPAD_PERF=1 go test -run LargeFileTimes -v ./internal/ui` times
-opening, editing, saving and searching a 13 MB file.
+The GUI tests and benchmarks run on Qt's offscreen platform, so they need
+no display. To see what a change does to the editor's speed, run the
+benchmarks before and after it and compare them with
+[benchstat](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat):
+
+```sh
+make bench COUNT=10 > old.txt
+# ...make the change...
+make bench COUNT=10 > new.txt
+benchstat old.txt new.txt
+```
+
+`make bench BENCH=Find` runs only the benchmarks whose names match.
 
 ## Licence
 
